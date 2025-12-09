@@ -1,0 +1,502 @@
+%% IDENTIFIKASI SISTEM - DATASET IDDATA5
+% Tugas Identifikasi Sistem - Semester Ganjil 2025/2026
+
+clear; clc; close all;
+
+%% 0. BUAT FOLDER UNTUK PENYIMPANAN
+if ~exist('hasil_identifikasi', 'dir')
+    mkdir('hasil_identifikasi');
+end
+fprintf('=== MEMBUAT FOLDER PENYIMPANAN ===\n');
+
+%% 1. MEMUAT DAN VISUALISASI DATA
+fprintf('\n=== MEMUAT DATASET IDDATA5 ===\n');
+load iddata5 z5;
+data = z5;
+
+fprintf('Nama Dataset: iddata5\n');
+fprintf('Jumlah Sample: %d\n', length(data.y));
+fprintf('Sample Time: %.4f detik\n', data.Ts);
+fprintf('Range Input: [%.4f, %.4f]\n', min(data.u), max(data.u));
+fprintf('Range Output: [%.4f, %.4f]\n', min(data.y), max(data.y));
+
+t = (0:length(data.y)-1) * data.Ts;
+
+%% 2. IDENTIFIKASI MODEL LINIER
+fprintf('\n=== IDENTIFIKASI MODEL LINIER ===\n');
+na = 2; nb = 2; nk = 1; nc = 2; nf = 2;
+
+arx_model = arx(data, [na nb nk]);
+armax_model = armax(data, [na nb nc nk]);
+oe_model = oe(data, [nb nf nk]);
+
+%% 3. IDENTIFIKASI MODEL NONLINIER
+fprintf('\n=== IDENTIFIKASI MODEL NONLINIER ===\n');
+
+try
+    nonlinear_arx = nlarx(data, [na nb nk], idSigmoidNetwork);
+catch
+    nonlinear_arx = nlarx(data, [na nb nk], 'sigmoidnet');
+end
+
+try
+    hw_model = nlhw(data, [nb nf nk], idSaturation, idDeadZone);
+catch
+    hw_model = nlhw(data, [nb nf nk], 'saturation', 'deadzone');
+end
+
+%% 4. PERBANDINGAN MODEL
+fprintf('\n=== PERBANDINGAN MODEL ===\n');
+
+models = {arx_model, armax_model, oe_model, nonlinear_arx, hw_model};
+model_names = {'ARX', 'ARMAX', 'OE', 'Nonlinear ARX', 'Hammerstein-Wiener'};
+
+% Hitung fitness dengan compare
+fitness_values = zeros(length(models), 1);
+for i = 1:length(models)
+    try
+        [~, fit] = compare(data, models{i});
+        fitness_values(i) = fit;
+    catch
+        fitness_values(i) = 0;
+    end
+end
+
+fprintf('\nHASIL FITNESS MODEL:\n');
+fprintf('-------------------\n');
+for i = 1:length(models)
+    fprintf('%18s: %6.2f%%\n', model_names{i}, fitness_values(i));
+end
+
+[best_fitness, best_idx] = max(fitness_values);
+fprintf('\n⭐ MODEL TERBAIK: %s (%.2f%%) ⭐\n', model_names{best_idx}, best_fitness);
+
+%% 5. RESIDUAL UNTUK SEMUA MODEL
+fprintf('\n=== ANALISIS RESIDUAL SEMUA MODEL ===\n');
+
+% GRAFIK RESIDUAL SEMUA MODEL
+figure('Position', [100, 100, 1400, 800]);
+sgtitle('ANALISIS RESIDUAL SEMUA MODEL', 'FontSize', 16, 'FontWeight', 'bold');
+
+% Plot residual untuk setiap model
+for i = 1:length(models)
+    subplot(2, 3, i);
+    try
+        resid(data, models{i});
+        title(sprintf('%s\nFitness: %.2f%%', model_names{i}, fitness_values(i)), ...
+            'FontSize', 12, 'FontWeight', 'bold');
+        grid on;
+    catch ME
+        plot(0, 0);
+        title(sprintf('%s\nError Residual', model_names{i}), ...
+            'FontSize', 12, 'FontWeight', 'bold', 'Color', 'red');
+        text(0.5, 0.5, 'Residual tidak tersedia', ...
+            'HorizontalAlignment', 'center', 'Units', 'normalized', ...
+            'FontSize', 10, 'Color', 'red');
+        axis off;
+    end
+end
+
+saveas(gcf, 'hasil_identifikasi/residual_semua_model.png');
+fprintf('Grafik residual semua model berhasil disimpan\n');
+
+%% 6. PREDIKSI STANDAR (TANPA PAKSAAN)
+fprintf('\n=== PREDIKSI STANDAR (PREDICT) ===\n');
+
+% Inisialisasi
+prediction_horizon = 1;
+predictions = cell(length(models), 1);
+pred_fitness = zeros(length(models), 1);
+pred_success = false(length(models), 1);
+error_messages = cell(length(models), 1);
+
+% Coba prediksi untuk setiap model
+for i = 1:length(models)
+    fprintf('\n%s: ', model_names{i});
+    try
+        [y_pred, fit_score] = predict(models{i}, data, prediction_horizon);
+        
+        % Cek apakah hasil valid
+        if ~isempty(y_pred) && ~isempty(fit_score)
+            if isscalar(fit_score)
+                pred_fitness(i) = fit_score;
+            else
+                pred_fitness(i) = fit_score(1);
+            end
+            predictions{i} = y_pred;
+            pred_success(i) = true;
+            fprintf('%.2f%%', pred_fitness(i));
+        else
+            predictions{i} = [];
+            pred_fitness(i) = NaN;
+            pred_success(i) = false;
+            error_messages{i} = 'Hasil kosong';
+            fprintf('Gagal - hasil kosong');
+        end
+    catch ME
+        predictions{i} = [];
+        pred_fitness(i) = NaN;
+        pred_success(i) = false;
+        error_messages{i} = ME.message;
+        fprintf('Gagal - %s', ME.message);
+    end
+end
+
+% Hitung berapa model yang berhasil prediksi
+success_count = sum(pred_success);
+fprintf('\n\n%d dari %d model berhasil melakukan prediksi standar\n', success_count, length(models));
+
+%% 7. VISUALISASI PREDIKSI HANYA UNTUK MODEL YANG BERHASIL
+if success_count > 0
+    fprintf('\n=== MEMBUAT VISUALISASI PREDIKSI ===\n');
+    
+    % GRAFIK PREDIKSI MODEL YANG BERHASIL
+    figure('Position', [100, 100, 1400, 800]);
+    
+    % Tentukan layout
+    if success_count == 1
+        rows = 1; cols = 1;
+    elseif success_count == 2
+        rows = 1; cols = 2;
+    elseif success_count == 3
+        rows = 1; cols = 3;
+    elseif success_count == 4
+        rows = 2; cols = 2;
+    else
+        rows = 2; cols = 3;
+    end
+    
+    plot_counter = 1;
+    
+    for i = 1:length(models)
+        if pred_success(i)
+            subplot(rows, cols, plot_counter);
+            
+            % Plot data aktual
+            plot(data.y, 'k-', 'LineWidth', 2);
+            hold on;
+            
+            % Plot prediksi
+            plot(predictions{i}.y, 'r-', 'LineWidth', 1.5);
+            
+            % Hitung error
+            min_len = min(length(data.y), length(predictions{i}.y));
+            y_actual = data.y(1:min_len);
+            y_pred = predictions{i}.y(1:min_len);
+            error = y_actual - y_pred;
+            
+            title(sprintf('%s\nPrediksi: %.2f%%', model_names{i}, pred_fitness(i)), ...
+                'FontSize', 12, 'FontWeight', 'bold');
+            
+            % Hitung metrik error
+            rmse_val = sqrt(mean(error.^2));
+            mae_val = mean(abs(error));
+            
+            % Tambahkan info error di plot
+            text(0.02, 0.95, sprintf('RMSE: %.4f\nMAE: %.4f', rmse_val, mae_val), ...
+                'Units', 'normalized', 'VerticalAlignment', 'top', ...
+                'FontSize', 9, 'BackgroundColor', 'white', 'EdgeColor', 'black');
+            
+            legend('Data Aktual', 'Prediksi', 'Location', 'best', 'FontSize', 9);
+            
+            xlabel('Sample', 'FontSize', 10);
+            ylabel('Output', 'FontSize', 10);
+            grid on;
+            hold off;
+            
+            plot_counter = plot_counter + 1;
+        end
+    end
+    
+    sgtitle('HASIL PREDIKSI STANDAR (MODEL YANG BERHASIL)', 'FontSize', 16, 'FontWeight', 'bold');
+    saveas(gcf, 'hasil_identifikasi/prediksi_standar_berhasil.png');
+    fprintf('Grafik prediksi standar berhasil disimpan\n');
+    
+    % GRAFIK PERBANDINGAN PREDIKSI
+    if success_count > 1
+        figure('Position', [100, 100, 1200, 600]);
+        
+        % Plot data aktual
+        plot(data.y, 'k-', 'LineWidth', 3);
+        hold on;
+        
+        % Warna untuk setiap model
+        colors = lines(length(models));
+        legend_entries = {'Data Aktual'};
+        
+        % Plot semua prediksi yang berhasil
+        for i = 1:length(models)
+            if pred_success(i)
+                plot(predictions{i}.y, 'LineWidth', 1.5, 'Color', colors(i,:));
+                legend_entries{end+1} = sprintf('%s (%.2f%%)', model_names{i}, pred_fitness(i));
+            end
+        end
+        
+        title('PERBANDINGAN SEMUA PREDIKSI YANG BERHASIL', 'FontSize', 16, 'FontWeight', 'bold');
+        xlabel('Sample', 'FontSize', 12);
+        ylabel('Output', 'FontSize', 12);
+        legend(legend_entries, 'Location', 'best', 'FontSize', 10);
+        grid on;
+        
+        saveas(gcf, 'hasil_identifikasi/perbandingan_prediksi_berhasil.png');
+        fprintf('Grafik perbandingan prediksi berhasil disimpan\n');
+    end
+else
+    fprintf('\nTidak ada model yang berhasil melakukan prediksi standar\n');
+end
+
+%% 8. VISUALISASI UTAMA LAINNYA
+%% GRAFIK 1: DATA ASLI
+figure('Position', [100, 100, 1200, 400]);
+subplot(1,2,1);
+plot(t, data.u, 'b-', 'LineWidth', 1.5);
+title('SINYAL INPUT', 'FontSize', 14, 'FontWeight', 'bold');
+xlabel('Waktu (s)', 'FontSize', 12);
+ylabel('u(t)', 'FontSize', 12);
+grid on;
+
+subplot(1,2,2);
+plot(t, data.y, 'r-', 'LineWidth', 1.5);
+title('SINYAL OUTPUT', 'FontSize', 14, 'FontWeight', 'bold');
+xlabel('Waktu (s)', 'FontSize', 12);
+ylabel('y(t)', 'FontSize', 12);
+grid on;
+
+sgtitle('DATASET IDDATA5', 'FontSize', 16, 'FontWeight', 'bold');
+saveas(gcf, 'hasil_identifikasi/01_data_asli.png');
+
+%% GRAFIK 2: PERBANDINGAN SEMUA MODEL
+figure('Position', [100, 100, 1000, 600]);
+compare(data, models{:});
+title('PERBANDINGAN SEMUA MODEL', 'FontSize', 16, 'FontWeight', 'bold');
+grid on;
+legend(model_names, 'Location', 'best');
+saveas(gcf, 'hasil_identifikasi/02_perbandingan_model.png');
+
+%% GRAFIK 3: FITNESS MODEL
+figure('Position', [100, 100, 800, 500]);
+
+% Warna berbeda untuk model linier dan nonlinier
+bar_colors = zeros(length(models), 3);
+for i = 1:length(models)
+    if i <= 3 % Model linier
+        bar_colors(i, :) = [0.2, 0.6, 0.8]; % Biru
+    else % Model nonlinier
+        bar_colors(i, :) = [0.8, 0.4, 0.2]; % Oranye
+    end
+end
+
+bars = bar(fitness_values);
+title('PERBANDINGAN FITNESS MODEL', 'FontSize', 16, 'FontWeight', 'bold');
+ylabel('Fitness (%)', 'FontSize', 12);
+xlabel('Model', 'FontSize', 12);
+set(gca, 'XTickLabel', model_names, 'XTickLabelRotation', 45, 'FontSize', 10);
+grid on;
+
+% Atur warna bar
+for i = 1:length(models)
+    bars.FaceColor = 'flat';
+    bars.CData(i,:) = bar_colors(i,:);
+end
+
+% Tambahkan nilai pada bar
+for i = 1:length(fitness_values)
+    if fitness_values(i) >= 0
+        y_pos = fitness_values(i) + 0.5;
+    else
+        y_pos = fitness_values(i) - 3;
+    end
+    text(i, y_pos, sprintf('%.2f%%', fitness_values(i)), ...
+        'HorizontalAlignment', 'center', 'FontSize', 10, 'FontWeight', 'bold');
+end
+
+saveas(gcf, 'hasil_identifikasi/03_fitness_model.png');
+
+%% GRAFIK 4: MODEL LINIER
+figure('Position', [100, 100, 1200, 500]);
+subplot(1,3,1);
+compare(data, arx_model);
+title(sprintf('ARX (%.2f%%)', fitness_values(1)), 'FontSize', 14, 'FontWeight', 'bold');
+grid on;
+
+subplot(1,3,2);
+compare(data, armax_model);
+title(sprintf('ARMAX (%.2f%%)', fitness_values(2)), 'FontSize', 14, 'FontWeight', 'bold');
+grid on;
+
+subplot(1,3,3);
+compare(data, oe_model);
+title(sprintf('OE (%.2f%%)', fitness_values(3)), 'FontSize', 14, 'FontWeight', 'bold');
+grid on;
+
+sgtitle('MODEL LINIER', 'FontSize', 16, 'FontWeight', 'bold');
+saveas(gcf, 'hasil_identifikasi/04_model_linier.png');
+
+%% GRAFIK 5: MODEL NONLINIER
+figure('Position', [100, 100, 1200, 500]);
+subplot(1,2,1);
+compare(data, nonlinear_arx);
+title(sprintf('NONLINEAR ARX (%.2f%%)', fitness_values(4)), 'FontSize', 14, 'FontWeight', 'bold');
+grid on;
+
+subplot(1,2,2);
+compare(data, hw_model);
+title(sprintf('HAMMERSTEIN-WIENER (%.2f%%)', fitness_values(5)), 'FontSize', 14, 'FontWeight', 'bold');
+grid on;
+
+sgtitle('MODEL NONLINIER', 'FontSize', 16, 'FontWeight', 'bold');
+saveas(gcf, 'hasil_identifikasi/05_model_nonlinier.png');
+
+%% GRAFIK 6: RESIDUAL MODEL TERBAIK
+figure('Position', [100, 100, 800, 600]);
+resid(data, models{best_idx});
+title(sprintf('RESIDUAL - MODEL TERBAIK (%s: %.2f%%)', model_names{best_idx}, fitness_values(best_idx)), ...
+    'FontSize', 16, 'FontWeight', 'bold');
+grid on;
+saveas(gcf, 'hasil_identifikasi/06_residual_terbaik.png');
+
+%% 9. SIMPAN HASIL KE FILE
+fprintf('\n=== MENYIMPAN HASIL ===\n');
+
+% Simpan tabel fitness
+T_fitness = table(model_names', fitness_values, ...
+    'VariableNames', {'Model', 'Fitness'});
+writetable(T_fitness, 'hasil_identifikasi/hasil_fitness.csv');
+fprintf('File hasil_fitness.csv berhasil disimpan\n');
+
+% Simpan tabel prediksi (hanya yang berhasil)
+if success_count > 0
+    % Filter yang berhasil
+    success_idx = find(pred_success);
+    success_names = model_names(success_idx);
+    success_fitness = pred_fitness(success_idx);
+    
+    T_pred = table(success_names', success_fitness, ...
+        'VariableNames', {'Model', 'Prediction_Fitness'});
+    writetable(T_pred, 'hasil_identifikasi/hasil_prediksi_standar.csv');
+    fprintf('File hasil_prediksi_standar.csv berhasil disimpan\n');
+end
+
+% Simpan tabel error jika ada yang berhasil
+if success_count > 0
+    % Hitung error untuk model yang berhasil
+    error_metrics = zeros(length(models), 3); % RMSE, MAE, R²
+    error_metrics(:,:) = NaN;
+    
+    for i = 1:length(models)
+        if pred_success(i)
+            y_actual = data.y;
+            y_pred = predictions{i}.y;
+            min_len = min(length(y_actual), length(y_pred));
+            y_actual = y_actual(1:min_len);
+            y_pred = y_pred(1:min_len);
+            
+            rmse = sqrt(mean((y_actual - y_pred).^2));
+            mae = mean(abs(y_actual - y_pred));
+            
+            ss_res = sum((y_actual - y_pred).^2);
+            ss_tot = sum((y_actual - mean(y_actual)).^2);
+            if ss_tot > 0
+                r2 = max(0, 1 - (ss_res/ss_tot));
+            else
+                r2 = 0;
+            end
+            
+            error_metrics(i, :) = [rmse, mae, r2];
+        end
+    end
+    
+    % Simpan error metrics
+    valid_indices = find(pred_success);
+    valid_names = model_names(valid_indices);
+    valid_rmse = error_metrics(valid_indices, 1);
+    valid_mae = error_metrics(valid_indices, 2);
+    valid_r2 = error_metrics(valid_indices, 3);
+    
+    T_error = table(valid_names', valid_rmse, valid_mae, valid_r2, ...
+        'VariableNames', {'Model', 'RMSE', 'MAE', 'R2'});
+    writetable(T_error, 'hasil_identifikasi/hasil_error_standar.csv');
+    fprintf('File hasil_error_standar.csv berhasil disimpan\n');
+end
+
+% Simpan ringkasan
+fileID = fopen('hasil_identifikasi/ringkasan_standar.txt', 'w');
+fprintf(fileID, 'HASIL IDENTIFIKASI SISTEM - IDDATA5\n');
+fprintf(fileID, '====================================\n\n');
+fprintf(fileID, 'Model Terbaik: %s (%.2f%%)\n', model_names{best_idx}, best_fitness);
+fprintf(fileID, '\nHASIL FITNESS SEMUA MODEL:\n');
+for i = 1:length(models)
+    fprintf(fileID, '  %s: %.2f%%\n', model_names{i}, fitness_values(i));
+end
+
+fprintf(fileID, '\nHASIL PREDIKSI STANDAR:\n');
+for i = 1:length(models)
+    if pred_success(i)
+        fprintf(fileID, '  %s: %.2f%%\n', model_names{i}, pred_fitness(i));
+    else
+        if ~isempty(error_messages{i})
+            fprintf(fileID, '  %s: Gagal - %s\n', model_names{i}, error_messages{i});
+        else
+            fprintf(fileID, '  %s: Gagal\n', model_names{i});
+        end
+    end
+end
+
+fprintf(fileID, '\nREKOMENDASI:\n');
+if success_count > 0
+    % Cari model dengan prediksi terbaik
+    [best_pred_fit, best_pred_idx] = max(pred_fitness(pred_success));
+    valid_pred_idx = find(pred_success);
+    best_pred_model_idx = valid_pred_idx(best_pred_idx);
+    
+    fprintf(fileID, '  Untuk prediksi, gunakan model %s (%.2f%%)\n', ...
+        model_names{best_pred_model_idx}, best_pred_fit);
+else
+    fprintf(fileID, '  Tidak ada rekomendasi untuk prediksi (semua model gagal prediksi standar)\n');
+    fprintf(fileID, '  Pertimbangkan untuk menggunakan model terbaik dari compare: %s\n', model_names{best_idx});
+end
+fclose(fileID);
+fprintf('File ringkasan_standar.txt berhasil disimpan\n');
+
+%% 10. TAMPILKAN KESIMPULAN
+fprintf('\n=== KESIMPULAN ===\n');
+fprintf('Model terbaik: %s (%.2f%%)\n', model_names{best_idx}, best_fitness);
+
+if success_count > 0
+    % Cari model dengan prediksi terbaik
+    [best_pred_fit, best_pred_idx] = max(pred_fitness(pred_success));
+    valid_pred_idx = find(pred_success);
+    best_pred_model_idx = valid_pred_idx(best_pred_idx);
+    
+    fprintf('Model terbaik untuk prediksi: %s (%.2f%%)\n', ...
+        model_names{best_pred_model_idx}, best_pred_fit);
+    fprintf('%d dari %d model berhasil melakukan prediksi standar\n', success_count, length(models));
+else
+    fprintf('Tidak ada model yang berhasil melakukan prediksi standar\n');
+end
+
+fprintf('\n=== GRAFIK YANG DISIMPAN ===\n');
+fprintf('1. hasil_identifikasi/01_data_asli.png\n');
+fprintf('2. hasil_identifikasi/02_perbandingan_model.png\n');
+fprintf('3. hasil_identifikasi/03_fitness_model.png\n');
+fprintf('4. hasil_identifikasi/04_model_linier.png\n');
+fprintf('5. hasil_identifikasi/05_model_nonlinier.png\n');
+fprintf('6. hasil_identifikasi/06_residual_terbaik.png\n');
+fprintf('7. hasil_identifikasi/residual_semua_model.png\n');
+
+if success_count > 0
+    fprintf('8. hasil_identifikasi/prediksi_standar_berhasil.png\n');
+    if success_count > 1
+        fprintf('9. hasil_identifikasi/perbandingan_prediksi_berhasil.png\n');
+    end
+end
+
+fprintf('\nFile data:\n');
+fprintf('- hasil_identifikasi/hasil_fitness.csv\n');
+if success_count > 0
+    fprintf('- hasil_identifikasi/hasil_prediksi_standar.csv\n');
+    fprintf('- hasil_identifikasi/hasil_error_standar.csv\n');
+end
+fprintf('- hasil_identifikasi/ringkasan_standar.txt\n');
+
+fprintf('\n=== ANALISIS SELESAI ===\n');
